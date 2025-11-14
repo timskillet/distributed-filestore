@@ -64,7 +64,7 @@ echo "Building API server..."
     exit 1
 }
 
-/usr/local/go/bin/go build -o dfs-api ./cmd/dfs-api || {
+/usr/local/go/bin/go build -buildvcs=false -o dfs-api ./cmd/dfs-api || {
     echo "ERROR: Failed to build API server"
     exit 1
 }

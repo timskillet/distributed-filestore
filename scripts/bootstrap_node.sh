@@ -76,7 +76,7 @@ echo "Building node server..."
     exit 1
 }
 
-/usr/local/go/bin/go build -o dfs-node ./cmd/dfs-node || {
+/usr/local/go/bin/go build -buildvcs=false -o dfs-node ./cmd/dfs-node || {
     echo "ERROR: Failed to build node server"
     exit 1
 }
