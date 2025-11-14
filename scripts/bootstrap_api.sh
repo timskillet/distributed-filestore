@@ -1,57 +1,64 @@
 #!/bin/bash
+
 set -e
 
 echo "Starting API server bootstrap..."
 
-# Update system
-sudo apt update -y
-sudo apt install -y git wget
+export HOME=${HOME:-/root}
 
-# Install Go 1.23+
+# Update system
+apt update -y
+apt install -y git wget build-essential
+
+# Install Go 1.23.x
 echo "Installing Go 1.23..."
 cd /tmp
 wget -q https://go.dev/dl/go1.23.2.linux-amd64.tar.gz
-sudo tar -C /usr/local -xzf go1.23.2.linux-amd64.tar.gz
+
+# Remove old Go if present
+rm -rf /usr/local/go
+
+tar -C /usr/local -xzf go1.23.2.linux-amd64.tar.gz
 rm -f go1.23.2.linux-amd64.tar.gz
 
-# Ensure Go is in PATH for this script
-export PATH=/usr/local/go/bin:$PATH
+export PATH="/usr/local/go/bin:$PATH"
 
-# Set GOPATH for Go module cache (required for go mod commands)
+# Set Go environment
 export GOPATH=/home/ubuntu/go
-mkdir -p $GOPATH
+export GOCACHE=/tmp/go-build-cache
+export GOMODCACHE=$GOPATH/pkg/mod
 
-# Verify Go version
+mkdir -p $GOPATH $GOCACHE
+chown -R ubuntu:ubuntu /home/ubuntu/go || true
+
 echo "Go version: $(go version)"
 
 # Create application directory
 APP_DIR="/opt/dfs-api"
-sudo mkdir -p $APP_DIR
+mkdir -p $APP_DIR
+chown -R ubuntu:ubuntu $APP_DIR
 
 # Remove existing directory if it exists (from previous failed runs)
 if [ -d "$APP_DIR/.git" ]; then
     echo "Removing existing repository..."
-    sudo rm -rf $APP_DIR/*
+    rm -rf $APP_DIR/*
 fi
 
 cd $APP_DIR
 
-# Clone repository
+# Clone repo
 echo "Cloning repository..."
 git clone https://github.com/timskillet/distributed-filestore.git . || {
     echo "ERROR: Failed to clone repository"
     exit 1
 }
 
-# Set environment variables
-export AWS_REGION=${AWS_REGION:-us-east-1}
-export CHUNK_METADATA_TABLE=${CHUNK_METADATA_TABLE:-dfs-chunk-metadata}
-export NODE_REGISTRY_TABLE=${NODE_REGISTRY_TABLE:-dfs-node-registry}
-export REPLICATION_FACTOR=${REPLICATION_FACTOR:-2}
+export AWS_REGION=$${AWS_REGION:-us-east-1}
+export CHUNK_METADATA_TABLE=$${CHUNK_METADATA_TABLE:-dfs-chunk-metadata}
+export NODE_REGISTRY_TABLE=$${NODE_REGISTRY_TABLE:-dfs-node-registry}
+export REPLICATION_FACTOR=$${REPLICATION_FACTOR:-2}
 
-# Build the API server
 echo "Building API server..."
-# Explicitly use /usr/local/go/bin/go to ensure we use the right version
 /usr/local/go/bin/go mod download || {
     echo "ERROR: Failed to download Go modules"
     exit 1
@@ -62,20 +69,14 @@ echo "Building API server..."
     exit 1
 }
 
-# Make binary executable
-chmod +x $APP_DIR/dfs-api
+chmod +x dfs-api
+chown ubuntu:ubuntu dfs-api
 
-# Verify binary exists
-if [ ! -f "$APP_DIR/dfs-api" ]; then
-    echo "ERROR: Binary was not created"
-    exit 1
-fi
-
-echo "Binary created successfully: $APP_DIR/dfs-api"
+echo "Binary created: $APP_DIR/dfs-api"
 
 # Create systemd service
 echo "Creating systemd service..."
-sudo tee /etc/systemd/system/dfs-api.service > /dev/null <<EOF
+tee /etc/systemd/system/dfs-api.service > /dev/null <<EOF
 [Unit]
 Description=DFS API Server
 After=network.target
@@ -84,7 +85,8 @@ After=network.target
 Type=simple
 User=ubuntu
 WorkingDirectory=$APP_DIR
-Environment="PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=/usr/local/go/bin:/usr/bin:/bin"
+Environment="HOME=/home/ubuntu"
 Environment="GOPATH=/home/ubuntu/go"
 Environment="AWS_REGION=$AWS_REGION"
 Environment="CHUNK_METADATA_TABLE=$CHUNK_METADATA_TABLE"
@@ -100,20 +102,14 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-# Enable and start service
-echo "Starting service..."
-sudo systemctl daemon-reload
-sudo systemctl enable dfs-api
-sudo systemctl start dfs-api
+systemctl daemon-reload
+systemctl enable dfs-api
+systemctl start dfs-api
 
-# Wait a moment and check status
 sleep 2
-if sudo systemctl is-active --quiet dfs-api; then
+if systemctl is-active --quiet dfs-api; then
     echo "✅ API server bootstrap complete! Service is running."
 else
-    echo "⚠️  Service started but may not be active. Check status with: sudo systemctl status dfs-api"
-    sudo systemctl status dfs-api --no-pager -l || true
+    echo "⚠️ Service may not be active. Check logs:"
+    systemctl status dfs-api --no-pager -l || true
 fi
-
-echo "Check status with: sudo systemctl status dfs-api"
-echo "View logs with: sudo journalctl -u dfs-api -f"

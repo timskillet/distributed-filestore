@@ -6,31 +6,44 @@ NODE_ID=${node_id}
 
 echo "Starting storage node bootstrap for $NODE_ID..."
 
-# Update system
-sudo yum update -y
-sudo yum install -y git wget awscli
+export HOME=$${HOME:-/root}
 
-# Install Go 1.23+
+# Update system
+yum update -y
+yum install -y git wget awscli gcc make
+
+# Install Go 1.23.x
 echo "Installing Go 1.23..."
 cd /tmp
 wget -q https://go.dev/dl/go1.23.2.linux-amd64.tar.gz
-sudo tar -C /usr/local -xzf go1.23.2.linux-amd64.tar.gz
+
+# Remove old Go if present
+rm -rf /usr/local/go
+
+tar -C /usr/local -xzf go1.23.2.linux-amd64.tar.gz
 rm -f go1.23.2.linux-amd64.tar.gz
 
-# Ensure Go is in PATH for this script
-export PATH=/usr/local/go/bin:$PATH
+export PATH="/usr/local/go/bin:$PATH"
 
-# Verify Go version
+# Set Go environment
+export GOPATH=/home/ec2-user/go
+export GOCACHE=/tmp/go-build-cache
+export GOMODCACHE=$GOPATH/pkg/mod
+
+mkdir -p $GOPATH $GOCACHE
+chown -R ec2-user:ec2-user /home/ec2-user/go || true
+
 echo "Go version: $(go version)"
 
 # Create application directory
 APP_DIR="/opt/dfs-node"
-sudo mkdir -p $APP_DIR
+mkdir -p $APP_DIR
+chown -R ec2-user:ec2-user $APP_DIR
 
 # Remove existing directory if it exists (from previous failed runs)
 if [ -d "$APP_DIR/.git" ]; then
     echo "Removing existing repository..."
-    sudo rm -rf $APP_DIR/*
+    rm -rf $APP_DIR/*
 fi
 
 cd $APP_DIR
@@ -58,7 +71,6 @@ export NODE_HEARTBEAT_TIMEOUT=$${NODE_HEARTBEAT_TIMEOUT:-60}
 
 # Build the node server
 echo "Building node server..."
-# Explicitly use /usr/local/go/bin/go to ensure we use the right version
 /usr/local/go/bin/go mod download || {
     echo "ERROR: Failed to download Go modules"
     exit 1
@@ -69,24 +81,18 @@ echo "Building node server..."
     exit 1
 }
 
-# Make binary executable
-chmod +x $APP_DIR/dfs-node
+chmod +x dfs-node
+chown ec2-user:ec2-user dfs-node
 
-# Verify binary exists
-if [ ! -f "$APP_DIR/dfs-node" ]; then
-    echo "ERROR: Binary was not created"
-    exit 1
-fi
-
-echo "Binary created successfully: $APP_DIR/dfs-node"
+echo "Binary created: $APP_DIR/dfs-node"
 
 # Create chunks directory
-sudo mkdir -p /opt/dfs/chunks
-sudo chown ec2-user:ec2-user /opt/dfs/chunks
+mkdir -p /opt/dfs/chunks
+chown ec2-user:ec2-user /opt/dfs/chunks
 
 # Create systemd service
 echo "Creating systemd service..."
-sudo tee /etc/systemd/system/dfs-node.service > /dev/null <<EOF
+tee /etc/systemd/system/dfs-node.service > /dev/null <<EOF
 [Unit]
 Description=DFS Storage Node
 After=network.target
@@ -95,7 +101,9 @@ After=network.target
 Type=simple
 User=ec2-user
 WorkingDirectory=$APP_DIR
-Environment="PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=/usr/local/go/bin:/usr/bin:/bin"
+Environment="HOME=/home/ec2-user"
+Environment="GOPATH=/home/ec2-user/go"
 Environment="AWS_REGION=$AWS_REGION"
 Environment="CHUNK_METADATA_TABLE=$CHUNK_METADATA_TABLE"
 Environment="NODE_REGISTRY_TABLE=$NODE_REGISTRY_TABLE"
@@ -114,19 +122,16 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-# Enable and start service
-echo "Starting service..."
-sudo systemctl daemon-reload
-sudo systemctl enable dfs-node
-sudo systemctl start dfs-node
+systemctl daemon-reload
+systemctl enable dfs-node
+systemctl start dfs-node
 
-# Wait a moment and check status
 sleep 2
-if sudo systemctl is-active --quiet dfs-node; then
+if systemctl is-active --quiet dfs-node; then
     echo "✅ Storage node bootstrap complete! Service is running."
 else
-    echo "⚠️  Service started but may not be active. Check status with: sudo systemctl status dfs-node"
-    sudo systemctl status dfs-node --no-pager -l || true
+    echo "⚠️ Service may not be active. Check logs:"
+    systemctl status dfs-node --no-pager -l || true
 fi
 
 echo "Node ID: $NODE_ID"
