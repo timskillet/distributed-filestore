@@ -27,6 +27,8 @@ func main() {
 	mux.HandleFunc("/init-upload", api.HandleInitUpload)
 	mux.HandleFunc("/finalize-upload", api.HandleFinalizeUpload)
 	mux.HandleFunc("/download-plan", api.HandleDownloadPlan)
+	mux.HandleFunc("/proxy-chunk-upload", api.HandleProxyChunkUpload)
+	mux.HandleFunc("/proxy-chunk-download", api.HandleProxyChunkDownload)
 
 	fmt.Printf("Starting DFS API server on port 8080\n")
 	fmt.Printf("AWS Region: %s\n", cfg.AWSRegion)

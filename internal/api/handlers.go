@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"sort"
@@ -84,6 +86,9 @@ func HandleInitUpload(w http.ResponseWriter, r *http.Request) {
 	uploadTargets := make([]UploadTarget, totalChunks)
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
+	// Get API server base URL from request
+	apiBaseURL := getAPIBaseURL(r)
+
 	// Select nodes for each chunk with replication
 	for i := 0; i < totalChunks; i++ {
 		// Select N nodes (replication factor) for this chunk
@@ -91,7 +96,8 @@ func HandleInitUpload(w http.ResponseWriter, r *http.Request) {
 
 		// First node is primary, rest are secondary
 		primaryNode := selectedNodes[0]
-		url := fmt.Sprintf("http://%s:%d/store-chunk?file_id=%s&chunk_index=%d", primaryNode.PrivateIP, primaryNode.Port, fileID, i)
+		// Use proxy URL instead of direct node URL
+		url := fmt.Sprintf("%s/proxy-chunk-upload?file_id=%s&chunk_index=%d&node_id=%s", apiBaseURL, fileID, i, primaryNode.NodeID)
 		uploadTargets[i] = UploadTarget{i, primaryNode.NodeID, url}
 	}
 
@@ -185,12 +191,10 @@ func HandleDownloadPlan(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		node, ok := nodeMap[selectedReplica.NodeID]
-		if !ok {
-			continue
-		}
-
-		url := fmt.Sprintf("http://%s:%d/get-chunk?file_id=%s&chunk_index=%d", node.PrivateIP, node.Port, fileID, chunkIndex)
+		// Get API server base URL from request
+		apiBaseURL := getAPIBaseURL(r)
+		// Use proxy URL instead of direct node URL
+		url := fmt.Sprintf("%s/proxy-chunk-download?file_id=%s&chunk_index=%d&node_id=%s", apiBaseURL, fileID, chunkIndex, selectedReplica.NodeID)
 		targets = append(targets, DownloadTarget{chunkIndex, url, selectedReplica.Checksum})
 	}
 
@@ -232,4 +236,162 @@ func selectBestReplica(replicas []*dynamodb.ChunkMetadata, nodeMap map[string]*d
 	}
 
 	return nil
+}
+
+// getAPIBaseURL constructs the API server base URL from the request
+func getAPIBaseURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	host := r.Host
+	if host == "" {
+		host = r.Header.Get("Host")
+	}
+	return fmt.Sprintf("%s://%s", scheme, host)
+}
+
+// HandleProxyChunkUpload proxies chunk upload requests to storage nodes
+func HandleProxyChunkUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte("Method not allowed"))
+		return
+	}
+
+	if apiServer == nil {
+		http.Error(w, "API server not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	// Get query parameters
+	fileID := r.URL.Query().Get("file_id")
+	chunkIndexStr := r.URL.Query().Get("chunk_index")
+	nodeID := r.URL.Query().Get("node_id")
+
+	if fileID == "" || chunkIndexStr == "" || nodeID == "" {
+		http.Error(w, "missing file_id, chunk_index, or node_id", http.StatusBadRequest)
+		return
+	}
+
+	// Look up node information from DynamoDB
+	ctx := context.Background()
+	node, err := apiServer.dbClient.GetNode(ctx, apiServer.cfg.NodeRegistryTable, nodeID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get node info: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Read chunk data from request body
+	chunkData, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read chunk data: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Construct node URL
+	nodeURL := fmt.Sprintf("http://%s:%d/store-chunk?file_id=%s&chunk_index=%s", node.PrivateIP, node.Port, fileID, chunkIndexStr)
+
+	// Create request to forward to node
+	req, err := http.NewRequest(http.MethodPut, nodeURL, bytes.NewReader(chunkData))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to create request: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Copy checksum header if present
+	if checksum := r.Header.Get("X-Chunk-Checksum"); checksum != "" {
+		req.Header.Set("X-Chunk-Checksum", checksum)
+	}
+
+	// Forward request to storage node
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to forward request to node: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers (must be before WriteHeader)
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	// Set response status
+	w.WriteHeader(resp.StatusCode)
+
+	// Copy response body
+	_, err = io.Copy(w, resp.Body)
+	if err != nil {
+		// Response already started, can't send error
+		return
+	}
+}
+
+// HandleProxyChunkDownload proxies chunk download requests to storage nodes
+func HandleProxyChunkDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte("Method not allowed"))
+		return
+	}
+
+	if apiServer == nil {
+		http.Error(w, "API server not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	// Get query parameters
+	fileID := r.URL.Query().Get("file_id")
+	chunkIndexStr := r.URL.Query().Get("chunk_index")
+	nodeID := r.URL.Query().Get("node_id")
+
+	if fileID == "" || chunkIndexStr == "" || nodeID == "" {
+		http.Error(w, "missing file_id, chunk_index, or node_id", http.StatusBadRequest)
+		return
+	}
+
+	// Look up node information from DynamoDB
+	ctx := context.Background()
+	node, err := apiServer.dbClient.GetNode(ctx, apiServer.cfg.NodeRegistryTable, nodeID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get node info: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Construct node URL
+	nodeURL := fmt.Sprintf("http://%s:%d/get-chunk?file_id=%s&chunk_index=%s", node.PrivateIP, node.Port, fileID, chunkIndexStr)
+
+	// Forward request to storage node
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+	resp, err := client.Get(nodeURL)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to forward request to node: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers (must be before WriteHeader)
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	// Set response status
+	w.WriteHeader(resp.StatusCode)
+
+	// Copy response body
+	_, err = io.Copy(w, resp.Body)
+	if err != nil {
+		// Response already started, can't send error
+		return
+	}
 }
