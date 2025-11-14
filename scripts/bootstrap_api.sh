@@ -17,6 +17,10 @@ rm -f go1.23.2.linux-amd64.tar.gz
 # Ensure Go is in PATH for this script
 export PATH=/usr/local/go/bin:$PATH
 
+# Set GOPATH for Go module cache (required for go mod commands)
+export GOPATH=/home/ubuntu/go
+mkdir -p $GOPATH
+
 # Verify Go version
 echo "Go version: $(go version)"
 
@@ -81,6 +85,7 @@ Type=simple
 User=ubuntu
 WorkingDirectory=$APP_DIR
 Environment="PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="GOPATH=/home/ubuntu/go"
 Environment="AWS_REGION=$AWS_REGION"
 Environment="CHUNK_METADATA_TABLE=$CHUNK_METADATA_TABLE"
 Environment="NODE_REGISTRY_TABLE=$NODE_REGISTRY_TABLE"
