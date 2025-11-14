@@ -1,0 +1,47 @@
+are removed via TTL or considered dead.
+
+Optional: On shutdown, delete the node’s entry cleanly.
+
+Example pseudo-code (Python + boto3):
+
+import time
+import boto3
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('StorageNodes')
+
+node_id = "node-1"
+private_ip = "10.0.1.12"
+port = 8080
+
+def register_node():
+    table.put_item(
+        Item={
+            'NodeID': node_id,
+            'PrivateIP': private_ip,
+            'Port': port,
+            'HeartbeatTS': int(time.time())
+        }
+    )
+
+def heartbeat_loop():
+    while True:
+        register_node()
+        time.sleep(10)  # update heartbeat every 10 seconds
+3. API Server Discovery Logic
+The API server queries the DynamoDB table to get live nodes:
+
+Scan or query nodes.
+
+Filter by HeartbeatTS to ignore stale nodes (e.g., last heartbeat > TTL).
+
+Pseudo-code:
+
+import time
+
+def get_live_nodes():
+    response = table.scan()  # small clusters, otherwise use query/index
+    nodes = []
+    now = int(time.time())
+    for item in response['Items']:
+   

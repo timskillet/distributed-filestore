@@ -2,6 +2,8 @@ package client
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"time"
 )
 
 // --- API Types ---
@@ -24,15 +27,22 @@ type UploadPlan struct {
 	UploadTargets []UploadTarget `json:"upload_targets"`
 }
 
-func InitUpload(apiURL, filePath string) (*UploadPlan, error) {
+const (
+	maxRetries        = 3
+	initialBackoff    = 1 * time.Second
+	backoffMultiplier = 2
+)
+
+func InitUpload(apiURL, filePath string, chunkSize int) (*UploadPlan, error) {
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat file: %v", err)
 	}
 
 	reqBody := map[string]interface{}{
-		"filename": fileInfo.Name(),
-		"size":     fileInfo.Size(),
+		"filename":   fileInfo.Name(),
+		"size":       fileInfo.Size(),
+		"chunk_size": chunkSize,
 	}
 
 	// Send upload request to API server
@@ -64,6 +74,8 @@ func UploadChunks(filePath string, plan *UploadPlan) error {
 	defer file.Close()
 
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failedChunks []int
 	chunkSize := plan.ChunkSize
 	buffer := make([]byte, chunkSize)
 
@@ -81,27 +93,66 @@ func UploadChunks(filePath string, plan *UploadPlan) error {
 		chunkData := make([]byte, n)
 		copy(chunkData, buffer[:n])
 
-		// Upload chunk concurrently
+		// Calculate SHA256 checksum
+		hash := sha256.Sum256(chunkData)
+		checksum := hex.EncodeToString(hash[:])
+
+		// Upload chunk concurrently with retry
 		wg.Add(1)
-		go func(target UploadTarget, chunkData []byte) {
+		go func(target UploadTarget, chunkData []byte, checksum string) {
 			defer wg.Done()
-			err := uploadChunk(target.URL, chunkData)
+			err := uploadChunkWithRetry(target.URL, chunkData, target.ChunkIndex, checksum)
 			if err != nil {
-				fmt.Printf("❌ Chunk %d failed: %v\n", target.ChunkIndex, err)
+				mu.Lock()
+				failedChunks = append(failedChunks, target.ChunkIndex)
+				mu.Unlock()
+				fmt.Printf("❌ Chunk %d failed after retries: %v\n", target.ChunkIndex, err)
 			} else {
-				fmt.Printf("✅ Chunk %d uploaded to %s\n", target.ChunkIndex, target.Node)
+				fmt.Printf("✅ Chunk %d uploaded to %s (checksum: %s)\n", target.ChunkIndex, target.Node, checksum[:16]+"...")
 			}
-		}(target, chunkData)
+		}(target, chunkData, checksum)
 	}
 	wg.Wait()
+
+	if len(failedChunks) > 0 {
+		return fmt.Errorf("failed to upload %d chunks: %v", len(failedChunks), failedChunks)
+	}
 	return nil
 }
 
-func uploadChunk(url string, chunkData []byte) error {
+func uploadChunkWithRetry(url string, chunkData []byte, chunkIndex int, checksum string) error {
+	var lastErr error
+	backoff := initialBackoff
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			fmt.Printf("⏳ Retrying chunk %d (attempt %d/%d) after %v...\n", chunkIndex, attempt+1, maxRetries, backoff)
+			time.Sleep(backoff)
+			backoff *= backoffMultiplier
+		}
+
+		err := uploadChunk(url, chunkData, checksum)
+		if err == nil {
+			if attempt > 0 {
+				fmt.Printf("✅ Chunk %d succeeded on retry attempt %d\n", chunkIndex, attempt+1)
+			}
+			return nil
+		}
+
+		lastErr = err
+	}
+
+	return fmt.Errorf("chunk upload failed after %d attempts: %v", maxRetries, lastErr)
+}
+
+func uploadChunk(url string, chunkData []byte, checksum string) error {
 	req, err := http.NewRequest("PUT", url, bytes.NewReader(chunkData))
 	if err != nil {
 		return err
 	}
+
+	// Include checksum in header for validation
+	req.Header.Set("X-Chunk-Checksum", checksum)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -138,6 +189,7 @@ func FinalizeUpload(apiURL, fileID string) error {
 type DownloadTarget struct {
 	ChunkIndex int    `json:"chunk_index"`
 	URL        string `json:"url"`
+	Checksum   string `json:"checksum"`
 }
 
 func DownloadFile(apiURL, fileID string, outputPath string) error {
@@ -170,18 +222,96 @@ func DownloadFile(apiURL, fileID string, outputPath string) error {
 	}
 	defer outFile.Close()
 
-	// 4. Download chunks sequentially
+	// 4. Download chunks concurrently
+	type chunkResult struct {
+		index    int
+		data     []byte
+		checksum string
+		err      error
+	}
+
+	var wg sync.WaitGroup
+	results := make(chan chunkResult, len(targets))
+
 	for _, t := range targets {
-		resp, err := http.Get(t.URL)
-		if err != nil {
-			return fmt.Errorf("failed to download chunk: %v", err)
+		wg.Add(1)
+		go func(t DownloadTarget) {
+			defer wg.Done()
+			resp, err := http.Get(t.URL)
+			if err != nil {
+				results <- chunkResult{index: t.ChunkIndex, err: fmt.Errorf("failed to download chunk: %v", err)}
+				return
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				results <- chunkResult{index: t.ChunkIndex, err: fmt.Errorf("chunk download failed: %s", string(body))}
+				return
+			}
+
+			data, err := io.ReadAll(resp.Body)
+			if err != nil {
+				results <- chunkResult{index: t.ChunkIndex, err: fmt.Errorf("failed to read chunk data: %v", err)}
+				return
+			}
+
+			// Calculate checksum of downloaded chunk
+			hash := sha256.Sum256(data)
+			calculatedChecksum := hex.EncodeToString(hash[:])
+
+			// Validate checksum if expected checksum is provided
+			if t.Checksum != "" && calculatedChecksum != t.Checksum {
+				results <- chunkResult{
+					index:    t.ChunkIndex,
+					err:      fmt.Errorf("checksum mismatch: expected %s, got %s", t.Checksum, calculatedChecksum),
+					checksum: calculatedChecksum,
+				}
+				return
+			}
+
+			results <- chunkResult{index: t.ChunkIndex, data: data, checksum: calculatedChecksum}
+		}(t)
+	}
+
+	// Close results channel when all downloads complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results and write in order
+	chunkMap := make(map[int][]byte)
+	var downloadErrors []error
+
+	for result := range results {
+		if result.err != nil {
+			fmt.Printf("❌ Chunk %d failed: %v\n", result.index, result.err)
+			downloadErrors = append(downloadErrors, result.err)
+		} else {
+			chunkMap[result.index] = result.data
+			if result.checksum != "" {
+				fmt.Printf("✅ Chunk %d downloaded and validated (checksum: %s...)\n", result.index, result.checksum[:16])
+			} else {
+				fmt.Printf("✅ Chunk %d downloaded\n", result.index)
+			}
 		}
-		_, err = io.Copy(outFile, resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return fmt.Errorf("failed to copy chunk data: %v", err)
+	}
+
+	if len(downloadErrors) > 0 {
+		return fmt.Errorf("failed to download %d chunks", len(downloadErrors))
+	}
+
+	// Write chunks to file in order
+	for i := 0; i < len(targets); i++ {
+		chunkData, ok := chunkMap[i]
+		if !ok {
+			return fmt.Errorf("missing chunk %d", i)
 		}
-		fmt.Printf("✅ Chunk %d downloaded from %s\n", t.ChunkIndex, t.URL)
+		_, err := outFile.Write(chunkData)
+		if err != nil {
+			return fmt.Errorf("failed to write chunk %d: %v", i, err)
+		}
 	}
 
 	fmt.Printf("✅ File downloaded to %s\n", outputPath)

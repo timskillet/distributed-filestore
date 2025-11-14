@@ -35,3 +35,31 @@ variable "project_name" {
   type        = string
   default     = "distributed-file-storage"
 }
+
+# Number of storage nodes
+variable "node_count" {
+  description = "Number of storage node instances to create"
+  type        = number
+  default     = 3
+}
+
+# Replication factor
+variable "replication_factor" {
+  description = "Number of replicas per chunk"
+  type        = number
+  default     = 2
+}
+
+# AMI ID for API server
+variable "ami_id" {
+  description = "AMI ID for API server (Ubuntu)"
+  type        = string
+  default     = "ami-0c55b159cbfafe1f0" # Amazon Linux 2, update for Ubuntu if needed
+}
+
+# AMI ID for storage nodes
+variable "node_ami_id" {
+  description = "AMI ID for storage nodes (Amazon Linux 2)"
+  type        = string
+  default     = ""
+}

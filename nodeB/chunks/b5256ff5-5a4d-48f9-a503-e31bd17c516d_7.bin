@@ -1,0 +1,13 @@
+; strong consistency isn’t strictly needed for most filestore scenarios.
+
+If you want fully managed AWS-native discovery, Cloud Map is the closest alternative but involves some setup and minor costs.
+
+💡 Bottom line:
+Your approach is perfectly valid for a distributed filestore. It’s essentially a DIY service registry using DynamoDB, which is common for small-to-medium clusters. For large-scale or enterprise-grade systems, you might switch to Cloud Map later for managed discovery.
+
+If you want, I can draft a concrete DynamoDB schema + node registration pattern optimized for filestore nodes that includes TTL/heartbeat handling. It would be production-ready and fully dynamic. Do you want me to do that?
+
+You said:
+How would you implement the DynamoDB service discovery? Would storage nodes just make entries to this table and the API server retrieves them? 
+ChatGPT said:
+Yes, that’s the core idea—but let’s make it concrete and production-ready. You can think of the DynamoDB table as your service registr

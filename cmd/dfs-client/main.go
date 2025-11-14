@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
@@ -19,22 +20,28 @@ func main() {
 
 	switch command {
 	case "upload":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: dfs-client upload <API_SERVER_URL> <FILE_PATH>")
+		uploadFlags := flag.NewFlagSet("upload", flag.ExitOnError)
+		chunkSize := uploadFlags.Int("chunk-size", 1024, "Chunk size in bytes (default: 1KB)")
+		uploadFlags.Parse(os.Args[2:])
+
+		if uploadFlags.NArg() < 2 {
+			fmt.Println("Usage: dfs-client upload [flags] <API_SERVER_URL> <FILE_PATH>")
+			fmt.Println("Flags:")
+			uploadFlags.PrintDefaults()
 			os.Exit(1)
 		}
-		apiURL := os.Args[2]
-		filePath := os.Args[3]
+		apiURL := uploadFlags.Args()[0]
+		filePath := uploadFlags.Args()[1]
 		fmt.Println("Initializing upload for:", filePath)
 
 		// 1. Initialize upload plan
-		uploadPlan, err := client.InitUpload(apiURL, filePath)
+		uploadPlan, err := client.InitUpload(apiURL, filePath, *chunkSize)
 		if err != nil {
 			panic(err)
 		}
 
 		// 2. Upload chunks concurrently
-		fmt.Printf("Uploading file %s in %dMB chunks...\n", filePath, uploadPlan.ChunkSize/(1024*1024))
+		fmt.Printf("Uploading file %s in %dKB chunks...\n", filePath, uploadPlan.ChunkSize)
 		err = client.UploadChunks(filePath, uploadPlan)
 		if err != nil {
 			panic(err)

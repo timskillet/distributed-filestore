@@ -1,0 +1,18 @@
+No external tools like Consul required.
+
+If you want, I can sketch a Terraform + startup script pattern that automatically registers nodes in Route53 or DynamoDB, so your filestore nodes discover each other at runtime without any human intervention. It’s a fully automated pattern used in production.
+
+Do you want me to do that?
+
+You said:
+Is this a custom solution or should I rely on using AWS resources for service discovery?
+
+My idea:
+Implement a service discovery mechanism using DynamoDB where storage nodes register themselves on startup, and the API server queries DynamoDB to discover available nodes dynamically.
+ChatGPT said:
+Your idea of using DynamoDB for service discovery is a valid and practical approach—but it’s more of a custom solution rather than relying on AWS’s built-in service discovery mechanisms like Cloud Map or Route 53 Private Hosted Zones. Let’s break it down carefully:
+
+1. Custom DynamoDB Service Discovery
+How it would work:
+
+Each storage node, on startup, writes an entry into a

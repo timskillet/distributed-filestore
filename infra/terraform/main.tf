@@ -53,10 +53,10 @@ resource "aws_route_table_association" "dfs_route_assoc" {
   route_table_id = aws_route_table.dfs_route_table.id
 }
 
-# Security Group
-resource "aws_security_group" "dfs_sg" {
+# Security Group for API Server
+resource "aws_security_group" "dfs_api_sg" {
   vpc_id = aws_vpc.dfs_vpc.id
-  name   = "dfs-sg"
+  name   = "dfs-api-sg"
 
   ingress {
     description = "Allow API traffic"
@@ -64,6 +64,59 @@ resource "aws_security_group" "dfs_sg" {
     to_port     = 8080
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Allow SSH access"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Allow API server to communicate with nodes
+  ingress {
+    description     = "Allow node communication from API"
+    from_port       = 8080
+    to_port         = 8090
+    protocol        = "tcp"
+    security_groups = [aws_security_group.dfs_node_sg.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "dfs-api-sg"
+  }
+}
+
+# Security Group for Storage Nodes
+resource "aws_security_group" "dfs_node_sg" {
+  vpc_id = aws_vpc.dfs_vpc.id
+  name   = "dfs-node-sg"
+
+  # Allow node-to-node communication for replication
+  ingress {
+    description     = "Allow node-to-node communication"
+    from_port       = 8080
+    to_port         = 8090
+    protocol        = "tcp"
+    security_groups = [aws_security_group.dfs_node_sg.id]
+    self            = true
+  }
+
+  # Allow API server to access nodes
+  ingress {
+    description     = "Allow API server to access nodes"
+    from_port       = 8080
+    to_port         = 8090
+    protocol        = "tcp"
+    security_groups = [aws_security_group.dfs_api_sg.id]
   }
 
   ingress {
@@ -82,7 +135,7 @@ resource "aws_security_group" "dfs_sg" {
   }
 
   tags = {
-    Name = "dfs-sg"
+    Name = "dfs-node-sg"
   }
 }
 
@@ -118,20 +171,62 @@ resource "aws_iam_instance_profile" "dfs_instance_profile" {
 }
 
 ######################
-# DynamoDB Table
+# DynamoDB Tables
 ######################
-resource "aws_dynamodb_table" "dfs_metadata" {
-  name         = "dfs-metadata"
+# Chunk Metadata Table - stores chunk locations with support for multiple replicas
+# Uses composite range key: chunk_index#node_id to allow multiple replicas per chunk
+resource "aws_dynamodb_table" "dfs_chunk_metadata" {
+  name         = "dfs-chunk-metadata"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "file_id"
+  range_key    = "chunk_replica_key"  # Format: "chunk_index#node_id"
 
   attribute {
     name = "file_id"
     type = "S"
   }
 
+  attribute {
+    name = "chunk_replica_key"
+    type = "S"
+  }
+
+  # Global Secondary Index to query by node_id
+  global_secondary_index {
+    name            = "node-id-index"
+    hash_key        = "node_id"
+    projection_type = "ALL"
+  }
+
+  attribute {
+    name = "node_id"
+    type = "S"
+  }
+
   tags = {
-    Name = "dfs-metadata"
+    Name = "dfs-chunk-metadata"
+  }
+}
+
+# Node Registry Table - service discovery for storage nodes
+resource "aws_dynamodb_table" "dfs_node_registry" {
+  name         = "dfs-node-registry"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "node_id"
+
+  attribute {
+    name = "node_id"
+    type = "S"
+  }
+
+  # TTL for automatic cleanup of stale nodes
+  ttl {
+    attribute_name = "heartbeat_ts"
+    enabled        = true
+  }
+
+  tags = {
+    Name = "dfs-node-registry"
   }
 }
 
@@ -153,44 +248,53 @@ resource "aws_s3_bucket" "dfs_backup" {
 ######################
 # EC2 Instance + EBS Volume
 ######################
+# API Server Instance
 resource "aws_instance" "dfs_api" {
   ami                    = var.ami_id
   instance_type          = "t3.micro"
   subnet_id              = aws_subnet.dfs_subnet.id
-  vpc_security_group_ids = [aws_security_group.dfs_sg.id]
-  iam_instance_profile   = aws_iam_instance_profile.dfs_profile.name
+  vpc_security_group_ids = [aws_security_group.dfs_api_sg.id]
+  iam_instance_profile   = aws_iam_instance_profile.dfs_instance_profile.name
   user_data              = file("../../scripts/bootstrap_api.sh")
-  key_name               = "dfs-key"
+  key_name               = var.key_pair_name
+
   tags = {
     Name = "DFS-API"
   }
 }
 
+# Storage Node Instances (multiple nodes for replication)
 resource "aws_instance" "dfs_node" {
-  ami                    = "ami-0c55b159cbfafe1f0" # Amazon Linux 2 (us-east-1)
+  count                  = var.node_count
+  ami                    = var.node_ami_id != "" ? var.node_ami_id : "ami-0c55b159cbfafe1f0" # Amazon Linux 2 (us-east-1)
   instance_type          = var.instance_type
   subnet_id              = aws_subnet.dfs_subnet.id
-  vpc_security_group_ids = [aws_security_group.dfs_sg.id]
+  vpc_security_group_ids = [aws_security_group.dfs_node_sg.id]
   key_name               = var.key_pair_name
   iam_instance_profile   = aws_iam_instance_profile.dfs_instance_profile.name
-  user_data              = file("../../scripts/bootstrap.sh")
+  user_data              = templatefile("../../scripts/bootstrap_node.sh", {
+    node_id = "node-${count.index}"
+  })
 
   tags = {
-    Name = "dfs-node"
+    Name = "dfs-node-${count.index}"
   }
 }
 
+# EBS Volumes for each storage node
 resource "aws_ebs_volume" "dfs_data_volume" {
-  availability_zone = aws_instance.dfs_node.availability_zone
+  count             = var.node_count
+  availability_zone = aws_instance.dfs_node[count.index].availability_zone
   size              = var.volume_size
 
   tags = {
-    Name = "dfs-data-volume"
+    Name = "dfs-data-volume-${count.index}"
   }
 }
 
 resource "aws_volume_attachment" "dfs_data_attach" {
+  count       = var.node_count
   device_name = "/dev/xvdf"
-  volume_id   = aws_ebs_volume.dfs_data_volume.id
-  instance_id = aws_instance.dfs_node.id
+  volume_id   = aws_ebs_volume.dfs_data_volume[count.index].id
+  instance_id = aws_instance.dfs_node[count.index].id
 }
