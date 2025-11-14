@@ -52,9 +52,9 @@ variable "replication_factor" {
 
 # AMI ID for API server
 variable "ami_id" {
-  description = "AMI ID for API server (Ubuntu)"
+  description = "AMI ID for API server (Ubuntu). Leave empty to use latest Ubuntu 22.04 LTS"
   type        = string
-  default     = "ami-0c55b159cbfafe1f0" # Amazon Linux 2, update for Ubuntu if needed
+  default     = ""
 }
 
 # AMI ID for storage nodes

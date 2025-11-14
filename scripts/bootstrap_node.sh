@@ -2,7 +2,7 @@
 set -e
 
 # Get node ID from Terraform template variable
-NODE_ID=${node_id:-node-0}
+NODE_ID=${node_id}
 
 echo "Starting storage node bootstrap for $NODE_ID..."
 
@@ -33,14 +33,14 @@ INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
 PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
 
 # Set environment variables
-export AWS_REGION=${AWS_REGION:-us-east-1}
-export CHUNK_METADATA_TABLE=${CHUNK_METADATA_TABLE:-dfs-chunk-metadata}
-export NODE_REGISTRY_TABLE=${NODE_REGISTRY_TABLE:-dfs-node-registry}
+export AWS_REGION=$${AWS_REGION:-us-east-1}
+export CHUNK_METADATA_TABLE=$${CHUNK_METADATA_TABLE:-dfs-chunk-metadata}
+export NODE_REGISTRY_TABLE=$${NODE_REGISTRY_TABLE:-dfs-node-registry}
 export NODE_ID=$NODE_ID
-export NODE_PORT=${NODE_PORT:-8080}
-export REPLICATION_FACTOR=${REPLICATION_FACTOR:-2}
-export NODE_HEARTBEAT_INTERVAL=${NODE_HEARTBEAT_INTERVAL:-30}
-export NODE_HEARTBEAT_TIMEOUT=${NODE_HEARTBEAT_TIMEOUT:-60}
+export NODE_PORT=$${NODE_PORT:-8080}
+export REPLICATION_FACTOR=$${REPLICATION_FACTOR:-2}
+export NODE_HEARTBEAT_INTERVAL=$${NODE_HEARTBEAT_INTERVAL:-30}
+export NODE_HEARTBEAT_TIMEOUT=$${NODE_HEARTBEAT_TIMEOUT:-60}
 
 # Build the node server
 echo "Building node server..."
@@ -90,4 +90,3 @@ echo "Instance ID: $INSTANCE_ID"
 echo "Private IP: $PRIVATE_IP"
 echo "Check status with: sudo systemctl status dfs-node"
 echo "View logs with: sudo journalctl -u dfs-node -f"
-

@@ -74,15 +74,6 @@ resource "aws_security_group" "dfs_api_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # Allow API server to communicate with nodes
-  ingress {
-    description     = "Allow node communication from API"
-    from_port       = 8080
-    to_port         = 8090
-    protocol        = "tcp"
-    security_groups = [aws_security_group.dfs_node_sg.id]
-  }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -106,7 +97,6 @@ resource "aws_security_group" "dfs_node_sg" {
     from_port       = 8080
     to_port         = 8090
     protocol        = "tcp"
-    security_groups = [aws_security_group.dfs_node_sg.id]
     self            = true
   }
 
@@ -250,7 +240,7 @@ resource "aws_s3_bucket" "dfs_backup" {
 ######################
 # API Server Instance
 resource "aws_instance" "dfs_api" {
-  ami                    = var.ami_id
+  ami                    = var.ami_id != "" ? var.ami_id : data.aws_ami.ubuntu.id
   instance_type          = "t3.micro"
   subnet_id              = aws_subnet.dfs_subnet.id
   vpc_security_group_ids = [aws_security_group.dfs_api_sg.id]
@@ -266,7 +256,7 @@ resource "aws_instance" "dfs_api" {
 # Storage Node Instances (multiple nodes for replication)
 resource "aws_instance" "dfs_node" {
   count                  = var.node_count
-  ami                    = var.node_ami_id != "" ? var.node_ami_id : "ami-0c55b159cbfafe1f0" # Amazon Linux 2 (us-east-1)
+  ami                    = var.node_ami_id != "" ? var.node_ami_id : data.aws_ami.amazon_linux_2.id
   instance_type          = var.instance_type
   subnet_id              = aws_subnet.dfs_subnet.id
   vpc_security_group_ids = [aws_security_group.dfs_node_sg.id]
