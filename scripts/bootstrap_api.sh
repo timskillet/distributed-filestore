@@ -53,10 +53,10 @@ git clone https://github.com/timskillet/distributed-filestore.git . || {
     exit 1
 }
 
-export AWS_REGION=$${AWS_REGION:-us-east-1}
-export CHUNK_METADATA_TABLE=$${CHUNK_METADATA_TABLE:-dfs-chunk-metadata}
-export NODE_REGISTRY_TABLE=$${NODE_REGISTRY_TABLE:-dfs-node-registry}
-export REPLICATION_FACTOR=$${REPLICATION_FACTOR:-2}
+export AWS_REGION=${AWS_REGION:-us-east-1}
+export CHUNK_METADATA_TABLE=${CHUNK_METADATA_TABLE:-dfs-chunk-metadata}
+export NODE_REGISTRY_TABLE=${NODE_REGISTRY_TABLE:-dfs-node-registry}
+export REPLICATION_FACTOR=${REPLICATION_FACTOR:-2}
 
 echo "Building API server..."
 /usr/local/go/bin/go mod download || {
